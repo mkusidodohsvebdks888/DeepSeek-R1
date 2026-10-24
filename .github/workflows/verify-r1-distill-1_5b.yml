@@ -1,0 +1,51 @@
+name: Verify independent DeepSeek 1.5B weight release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/verify-r1-distill-1_5b.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      RELEASE_TAG: deepseek-r1-distill-qwen-1.5b-ad9f0ae0864d
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Download all assets exclusively from this independent GitHub Release
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/archived-model"
+          gh release download "$RELEASE_TAG" --repo "$GH_REPO" --dir "$RUNNER_TEMP/archived-model" --clobber
+          cd "$RUNNER_TEMP/archived-model"
+          ls -lh
+
+      - name: Verify all asset SHA256 digests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/archived-model"
+          sha256sum -c SHA256SUMS
+
+      - name: Verify reconstructed model from GitHub data only
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/archived-model"
+          test -f model.safetensors.part-000
+          test -f model.safetensors.part-001
+          test -f model.safetensors.part-002
+          expected="$(cut -d' ' -f1 MODEL_SHA256.txt)"
+          actual="$(cat model.safetensors.part-* | sha256sum | cut -d' ' -f1)"
+          test "$actual" = "$expected"
+          tar -tzf metadata.tar.gz | grep -Eq '(^|/)config\.json$'
+          echo "PASS: independent GitHub release is complete and hash-matches the originally downloaded weight"
+
