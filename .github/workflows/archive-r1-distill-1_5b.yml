@@ -1,0 +1,93 @@
+name: Archive DeepSeek R1 Distill Qwen 1.5B weights
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/archive-r1-distill-1_5b.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: archive-r1-distill-1_5b
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      MODEL_REPO: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
+      MODEL_REV: ad9f0ae0864d7fbcd1cd905e3c6c5b069cc8b562
+      RELEASE_TAG: deepseek-r1-distill-qwen-1.5b-ad9f0ae0864d
+      HF_HOME: ${{ runner.temp }}/huggingface
+    steps:
+      - name: Install Hugging Face downloader
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install 'huggingface_hub==0.36.0'
+
+      - name: Fetch the actual official model snapshot, fixed revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from huggingface_hub import snapshot_download
+          dest = Path(os.environ['RUNNER_TEMP']) / 'deepseek-weight-snapshot'
+          print('Official repository:', os.environ['MODEL_REPO'])
+          print('Pinned commit:', os.environ['MODEL_REV'])
+          snapshot_download(
+              repo_id=os.environ['MODEL_REPO'],
+              revision=os.environ['MODEL_REV'],
+              local_dir=str(dest),
+          )
+          weight = dest / 'model.safetensors'
+          if not weight.is_file() or weight.stat().st_size < 1_000_000_000:
+              raise RuntimeError('Required official full-precision weight file not found')
+          print('Verified local weight bytes:', weight.stat().st_size)
+          PY
+
+      - name: Split large weight file and preserve all metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          src="${RUNNER_TEMP}/deepseek-weight-snapshot"
+          out="${RUNNER_TEMP}/deepseek-release-assets"
+          mkdir -p "$out"
+          split -b 1500M -d -a 3 "$src/model.safetensors" "$out/model.safetensors.part-"
+          ( cd "$src" && sha256sum model.safetensors ) > "$out/MODEL_SHA256.txt"
+          tar --exclude='./model.safetensors' --exclude='./.cache' -czf "$out/metadata.tar.gz" -C "$src" .
+          printf '%s\n' \
+            "Original model: ${MODEL_REPO}" \
+            "Pinned upstream revision: ${MODEL_REV}" \
+            'This is an actual archived weight copy in release assets, NOT a pointer.' \
+            'GitHub code fork alone does not contain these weights.' > "$out/SOURCE.txt"
+          printf '%s\n' \
+            'Download all assets of this GitHub Release into one empty directory.' \
+            'Verify assets: sha256sum -c SHA256SUMS' \
+            'Reconstruct model: cat model.safetensors.part-* > model.safetensors' \
+            'Verify original model: sha256sum -c MODEL_SHA256.txt' \
+            'Restore configs/tokenizer/license: tar -xzf metadata.tar.gz' > "$out/RESTORE_INSTRUCTIONS.txt"
+          ( cd "$out" && sha256sum model.safetensors.part-* MODEL_SHA256.txt metadata.tar.gz SOURCE.txt RESTORE_INSTRUCTIONS.txt > SHA256SUMS )
+          ls -lh "$out"
+
+      - name: Upload weight chunks to this fork's GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          assets="${RUNNER_TEMP}/deepseek-release-assets"
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$assets"/* --clobber
+          else
+            gh release create "$RELEASE_TAG" "$assets"/* \
+              --title 'Independent weights: DeepSeek-R1-Distill-Qwen-1.5B' \
+              --notes "Original: https://huggingface.co/${MODEL_REPO}/tree/${MODEL_REV}. Pinned official weights archived as <2 GiB shards. Includes model metadata, license and SHA256 checksums. This is NOT the 671B DeepSeek-R1 model."
+          fi
+          gh release view "$RELEASE_TAG" --json url,assets --jq '{url: .url, assets: [.assets[] | {name: .name, size: .size}]}'
